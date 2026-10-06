@@ -1,0 +1,6 @@
+html, body, #root { min-height: 100%; }
+body { margin: 0; min-width: 1180px; }
+button { font: inherit; }
+a.active { background: #245049; color: white !important; }
+a { text-decoration: none; }
+table { border-collapse: collapse; }
