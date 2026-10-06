@@ -8,7 +8,7 @@ import { AuditArchive } from './views/AuditArchive'
 
 function Shell() {
   const reset = useClaimStore((state) => state.reset)
-  const review = useClaimStore((state) => state.claims.filter((item) => item.status === '待编辑复核').length)
+  const review = useClaimStore((state) => state.batches.filter((item) => item.status === '复核中').length)
   return <Flex minH="100vh">
     <Box position="fixed" w="238px" inset="0 auto 0 0" bg="#17342f" color="white" px="4" py="5">
       <HStack borderBottomWidth="1px" borderColor="whiteAlpha.300" pb="5">

@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
-import { Badge, Box, Button, Divider, Flex, FormControl, FormLabel, Grid, Input, Modal, ModalBody, ModalCloseButton, ModalContent, ModalFooter, ModalHeader, ModalOverlay, Select, Tab, TabList, TabPanel, TabPanels, Tabs, Text, Textarea, useDisclosure, useToast } from '@chakra-ui/react'
+import { Link, useParams } from 'react-router-dom'
+import { Badge, Box, Button, Divider, Flex, FormControl, FormLabel, Grid, HStack, Input, Modal, ModalBody, ModalCloseButton, ModalContent, ModalFooter, ModalHeader, ModalOverlay, Select, Tab, TabList, TabPanel, TabPanels, Tabs, Text, Textarea, useDisclosure, useToast } from '@chakra-ui/react'
 import { EvidenceGraph } from '../components/EvidenceGraph'
 import { conclusionColor, useClaimStore } from '../store/useClaimStore'
+import { preflightBasis } from '../services/batchEngine'
 import type { ClaimFact, EvidenceKind, FactConclusion, SourceRecord } from '../types'
+
+const batchStatusColor: Record<string, string> = { 复核中: 'orange', 已失效: 'red', 已发布: 'green', 已撤回: 'gray' }
 
 export function ClaimWorkspace() {
   const { id } = useParams()
@@ -14,32 +17,40 @@ export function ClaimWorkspace() {
   const selectedFact = claim?.facts.find((item) => item.id === selectedFactId) ?? claim?.facts[0]
   const [factText, setFactText] = useState('')
   const sourceModal = useDisclosure()
-  const versionModal = useDisclosure()
-  const [sourceForm, setSourceForm] = useState<Omit<SourceRecord, 'id' | 'capturedAt' | 'version'>>({ title: '', url: '', publisher: '', publishedAt: '2026-09-29', kind: '原始证据', chainOfCustody: '', contentHash: '' })
+  const reviewModal = useDisclosure()
+  const [sourceForm, setSourceForm] = useState<Omit<SourceRecord, 'id' | 'capturedAt' | 'version' | 'revision' | 'withdrawn'>>({ title: '', url: '', publisher: '', publishedAt: '2026-09-29', kind: '原始证据', chainOfCustody: '', contentHash: '' })
   const [counterSource, setCounterSource] = useState(false)
-  const [transitionNote, setTransitionNote] = useState('')
+  const [reviewNote, setReviewNote] = useState('')
   useEffect(() => { if (!selectedFactId && claim?.facts[0]) setSelectedFactId(claim.facts[0].id) }, [selectedFactId, claim])
   if (!claim) return <Box p="10">未找到核查主张</Box>
+  const activeBatches = state.batches.filter((batch) => batch.claimId === claim.id)
+  const liveBatch = activeBatches[0]
   const setFact = (patch: Partial<ClaimFact>) => { if (selectedFact) state.updateFact(claim.id, selectedFact.id, patch) }
   const addSource = () => {
     if (!selectedFact || !sourceForm.title || !sourceForm.url) return
     state.addSource(claim.id, selectedFact.id, sourceForm, counterSource)
     sourceModal.onClose()
-    toast({ title: '证据已加入关系图', status: 'success' })
+    toast({ title: '证据已加入关系图，相关批次将按依据变化重评', status: 'success' })
   }
-  const transition = (status: typeof claim.status) => {
-    const result = state.transitionClaim(claim.id, status, transitionNote || `由${claim.status}流转至${status}`)
+  const enterReview = () => {
+    const result = state.enterReview(claim.id, reviewNote)
     toast({ title: result.message, status: result.ok ? 'success' : 'error' })
-    if (result.ok) versionModal.onClose()
+    if (result.ok) reviewModal.onClose()
+    setReviewNote('')
   }
   const exportArchive = () => {
     const versions = state.versions.filter((item) => item.claimId === claim.id)
     const audit = state.audit.filter((item) => item.claimId === claim.id)
-    const blob = new Blob([JSON.stringify({ claim, versions, audit }, null, 2)], { type: 'application/json' })
+    const batches = activeBatches
+    const blob = new Blob([JSON.stringify({ claim, batches, versions, audit }, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `${claim.id}-核查档案.json`; anchor.click(); URL.revokeObjectURL(url)
   }
+  const frozenBlocking = liveBatch ? preflightBasis(liveBatch.basis) : []
   return <Box p="6" pb="16">
-    <Flex justify="space-between" align="flex-start" mb="4"><Box><Text fontSize="xs" color="gray.600">{claim.id} · {claim.reporter} / {claim.editor} · V{claim.version}</Text><Text fontSize="xl" fontWeight="700" mt="1">{claim.title}</Text><Text color="gray.600" fontSize="sm" mt="2" maxW="760px">{claim.summary}</Text></Box><Flex gap="2"><Button variant="outline" onClick={exportArchive}>导出档案</Button><Button colorScheme="teal" onClick={versionModal.onOpen}>状态与版本</Button></Flex></Flex>
+    <Flex justify="space-between" align="flex-start" mb="4"><Box><Text fontSize="xs" color="gray.600">{claim.id} · {claim.reporter} / {claim.editor} · V{claim.version} · 修订号 r{claim.revision ?? '—（旧数据待基线化）'}</Text><Text fontSize="xl" fontWeight="700" mt="1">{claim.title}</Text><Text color="gray.600" fontSize="sm" mt="2" maxW="760px">{claim.summary}</Text></Box><Flex gap="2"><Button variant="outline" onClick={exportArchive}>导出档案</Button><Button colorScheme="teal" onClick={reviewModal.onOpen} isDisabled={!!liveBatch && liveBatch.status === '复核中'}>{liveBatch?.status === '复核中' ? '批次复核中' : liveBatch?.status === '已失效' ? '重新冻结并提交复核' : '提交编辑复核'}</Button></Flex></Flex>
+
+    {liveBatch && <BatchBanner batchId={liveBatch.id} />}
+
     <EvidenceGraph facts={claim.facts} />
     <Grid mt="4" templateColumns="320px 1fr" gap="4" alignItems="start">
       <Box bg="white" borderWidth="1px" p="3">
@@ -57,26 +68,51 @@ export function ClaimWorkspace() {
         <Tabs mt="5" colorScheme="teal">
           <TabList><Tab>支持证据 {selectedFact.sources.length}</Tab><Tab>相反证据 {selectedFact.counterSources.length}</Tab><Tab>批注 {selectedFact.annotations.length}</Tab><Tab>来源时间线</Tab></TabList>
           <TabPanels>
-            <TabPanel px="0"><EvidenceList sources={selectedFact.sources} claimId={claim.id} onAdd={() => { setCounterSource(false); sourceModal.onOpen() }} /></TabPanel>
-            <TabPanel px="0"><EvidenceList sources={selectedFact.counterSources} claimId={claim.id} onAdd={() => { setCounterSource(true); sourceModal.onOpen() }} counter /></TabPanel>
+            <TabPanel px="0"><EvidenceList sources={selectedFact.sources} claimId={claim.id} factId={selectedFact.id} counter={false} onAdd={() => { setCounterSource(false); sourceModal.onOpen() }} /></TabPanel>
+            <TabPanel px="0"><EvidenceList sources={selectedFact.counterSources} claimId={claim.id} factId={selectedFact.id} counter onAdd={() => { setCounterSource(true); sourceModal.onOpen() }} /></TabPanel>
             <TabPanel px="0"><AnnotationList fact={selectedFact} claimId={claim.id} /></TabPanel>
-            <TabPanel px="0"><Box borderLeftWidth="2px" borderColor="gray.300" pl="4">{[...selectedFact.sources, ...selectedFact.counterSources].sort((a, b) => a.publishedAt.localeCompare(b.publishedAt)).map((source) => <Box key={source.id} mb="4"><Text fontSize="xs" color="gray.500">{source.publishedAt} · {source.kind}</Text><Text fontWeight="600" mt="1">{source.title}</Text><Text fontSize="sm" color="gray.600">{source.publisher} · 留档 {source.capturedAt.replace('T', ' ').slice(0, 16)}</Text></Box>)}</Box></TabPanel>
+            <TabPanel px="0"><Box borderLeftWidth="2px" borderColor="gray.300" pl="4">{[...selectedFact.sources, ...selectedFact.counterSources].sort((a, b) => a.publishedAt.localeCompare(b.publishedAt)).map((source) => <Box key={source.id} mb="4"><Text fontSize="xs" color="gray.500">{source.publishedAt} · {source.kind}{source.withdrawn && ' · 已撤下'}</Text><Text fontWeight="600" mt="1">{source.title}</Text><Text fontSize="sm" color="gray.600">{source.publisher} · 留档 {source.capturedAt.replace('T', ' ').slice(0, 16)}</Text></Box>)}</Box></TabPanel>
           </TabPanels>
         </Tabs>
       </Box>}
     </Grid>
     <Modal isOpen={sourceModal.isOpen} onClose={sourceModal.onClose} size="xl"><ModalOverlay /><ModalContent><ModalHeader>{counterSource ? '关联相反证据' : '关联支持证据'}</ModalHeader><ModalCloseButton /><ModalBody><Grid templateColumns="1fr 1fr" gap="3"><FormControl><FormLabel>来源标题</FormLabel><Input value={sourceForm.title} onChange={(event) => setSourceForm({ ...sourceForm, title: event.target.value })} /></FormControl><FormControl><FormLabel>公开地址</FormLabel><Input value={sourceForm.url} onChange={(event) => setSourceForm({ ...sourceForm, url: event.target.value })} /></FormControl><FormControl><FormLabel>发布机构</FormLabel><Input value={sourceForm.publisher} onChange={(event) => setSourceForm({ ...sourceForm, publisher: event.target.value })} /></FormControl><FormControl><FormLabel>证据类型</FormLabel><Select value={sourceForm.kind} onChange={(event) => setSourceForm({ ...sourceForm, kind: event.target.value as EvidenceKind })}>{['原始证据', '二次来源', '待证信息'].map((value) => <option key={value}>{value}</option>)}</Select></FormControl><FormControl><FormLabel>内容哈希</FormLabel><Input placeholder="sha256:..." value={sourceForm.contentHash} onChange={(event) => setSourceForm({ ...sourceForm, contentHash: event.target.value })} /></FormControl><FormControl><FormLabel>留档说明</FormLabel><Input value={sourceForm.chainOfCustody} onChange={(event) => setSourceForm({ ...sourceForm, chainOfCustody: event.target.value })} /></FormControl></Grid></ModalBody><ModalFooter><Button variant="ghost" mr="3" onClick={sourceModal.onClose}>取消</Button><Button colorScheme="teal" isDisabled={!sourceForm.title || !sourceForm.url} onClick={addSource}>加入证据关系图</Button></ModalFooter></ModalContent></Modal>
-    <Modal isOpen={versionModal.isOpen} onClose={versionModal.onClose}><ModalOverlay /><ModalContent><ModalHeader>状态流转与版本说明</ModalHeader><ModalCloseButton /><ModalBody><FormControl mb="4"><FormLabel>版本变更说明</FormLabel><Textarea rows={4} value={transitionNote} onChange={(event) => setTransitionNote(event.target.value)} /></FormControl><Text fontSize="xs" color="gray.500">待编辑复核需要至少一项事实；发布时会拦截证据不足且存在疑点的事实。</Text></ModalBody><ModalFooter><Button mr="2" onClick={() => transition('待编辑复核')}>提交编辑复核</Button><Button colorScheme="teal" onClick={() => transition('已发布')}>发布正式版本</Button></ModalFooter></ModalContent></Modal>
+    <Modal isOpen={reviewModal.isOpen} onClose={reviewModal.onClose}><ModalOverlay /><ModalContent><ModalHeader>{liveBatch?.status === '已失效' ? '重新冻结依据并提交复核' : '冻结依据并进入编辑复核'}</ModalHeader><ModalCloseButton /><ModalBody>
+      <Text fontSize="sm" color="gray.600" mb="3">进入复核时将冻结当前结论、来源与相反证据（r{claim.revision}）。复核期间另一窗口的任何改版/撤下都不会改动这份依据：未批准批次将失效并列明受影响事实，已批准批次保留快照并标注必须复议。</Text>
+      {frozenBlocking.length === 0 && liveBatch?.status === '复核中' && <Text fontSize="xs" color="green.600" mb="2">当前冻结依据通过发布前校验（{frozenBlocking.length === 0 ? '无阻断' : frozenBlocking.join('；')}）</Text>}
+      {liveBatch?.status === '复核中' && frozenBlocking.length > 0 && <Box bg="red.50" p="2" mb="2">{frozenBlocking.map((item) => <Text key={item} fontSize="xs" color="red.700">· {item}</Text>)}</Box>}
+      <FormControl><FormLabel>复核说明</FormLabel><Textarea rows={3} value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} placeholder="如：请编辑按冻结快照审阅，勿引用工作区实时数据" /></FormControl>
+    </ModalBody><ModalFooter><Button variant="ghost" mr="3" onClick={reviewModal.onClose}>取消</Button><Button colorScheme="teal" onClick={enterReview}>冻结并提交复核队列</Button></ModalFooter></ModalContent></Modal>
   </Box>
 }
 
-function EvidenceList({ sources, claimId, onAdd, counter = false }: { sources: SourceRecord[]; claimId: string; onAdd: () => void; counter?: boolean }) {
-  return <Box><Flex justify="space-between" mb="3"><Text fontSize="sm" color="gray.600">{counter ? '相反证据与支持证据并列保留' : '按原始证据、二次来源、待证信息分类'}</Text><Button size="sm" colorScheme={counter ? 'red' : 'teal'} variant="outline" onClick={onAdd}>{counter ? '关联相反证据' : '关联支持证据'}</Button></Flex>{sources.map((source) => <Box key={source.id} borderWidth="1px" p="3" mb="2"><Flex justify="space-between"><Text fontWeight="600">{source.title}</Text><Badge colorScheme={source.kind === '原始证据' ? 'green' : source.kind === '二次来源' ? 'orange' : 'gray'}>{source.kind}</Badge></Flex><Text fontSize="xs" color="gray.600" mt="2">{source.publisher} · {source.publishedAt} · V{source.version}</Text><Text fontFamily="mono" fontSize="xs" mt="2">{source.contentHash}</Text><Divider my="2" /><Text fontSize="xs">{source.chainOfCustody}</Text><Text fontSize="xs" color="blue.600" mt="1" wordBreak="break-all">{source.url}</Text></Box>)}</Box>
+function BatchBanner({ batchId }: { batchId: string }) {
+  const batch = useClaimStore((state) => state.batches.find((item) => item.id === batchId))
+  if (!batch) return null
+  const evidenceCount = batch.basis.facts.reduce((sum, fact) => sum + fact.sources.length + fact.counterSources.length, 0)
+  return <Box borderWidth="1px" bg="white" p="3" mb="4" borderLeftWidth="4px" borderLeftColor={batch.status === '复核中' ? 'orange.400' : batch.status === '已失效' ? 'red.500' : batch.status === '已发布' ? 'green.500' : 'gray.400'}>
+    <Flex justify="space-between" align="center">
+      <Box>
+        <Flex gap="2" align="center"><Badge colorScheme={batchStatusColor[batch.status]}>{batch.status}</Badge><Text fontFamily="mono" fontSize="xs">{batch.id} · r{batch.revision}</Text><Text fontSize="xs" color="gray.500">冻结于 {batch.basis.frozenAt.replace('T', ' ').slice(0, 16)}（{batch.basis.frozenBy}）· {batch.basis.facts.length} 事实 / {evidenceCount} 证据</Text></Flex>
+        {batch.status === '复核中' && <Text fontSize="xs" color="gray.600" mt="1">复核窗口只按这份冻结依据审阅；{batch.impact.length > 0 ? `已检测到 ${batch.impact.length} 项偏离` : '尚未检测到偏离'}</Text>}
+        {batch.status === '已失效' && <Text fontSize="xs" color="red.700" mt="1">批次已失效：{batch.impact.length} 项事实依据发生变化，需重新冻结后提交复核</Text>}
+        {batch.mustReconsider && <Text fontSize="xs" color="purple.700" mt="1" fontWeight="600">已批准快照保留中，但依据已变化，必须复议：{batch.reconsiderNote}</Text>}
+      </Box>
+      <Link to="/reviews"><Button size="xs" variant="outline">前往复核队列</Button></Link>
+    </Flex>
+    {batch.impact.length > 0 && <Flex mt="2" gap="2" wrap="wrap">{batch.impact.slice(0, 6).map((impact, index) => <Badge key={`${impact.factId}-${impact.kind}-${index}`} colorScheme="red" variant="outline">{impact.factId} · {impact.kind}</Badge>)}{batch.impact.length > 6 && <Badge variant="outline">+{batch.impact.length - 6}</Badge>}</Flex>}
+  </Box>
+}
+
+function EvidenceList({ sources, claimId, factId, onAdd, counter = false }: { sources: SourceRecord[]; claimId: string; factId: string; onAdd: () => void; counter?: boolean }) {
+  const withdrawSource = useClaimStore((state) => state.withdrawSource)
+  const toast = useToast()
+  return <Box><Flex justify="space-between" mb="3"><Text fontSize="sm" color="gray.600">{counter ? '相反证据与支持证据并列保留' : '按原始证据、二次来源、待证信息分类'}</Text><Button size="sm" colorScheme={counter ? 'red' : 'teal'} variant="outline" onClick={onAdd}>{counter ? '关联相反证据' : '关联支持证据'}</Button></Flex>{sources.map((source) => <Box key={source.id} borderWidth="1px" p="3" mb="2" opacity={source.withdrawn ? 0.6 : 1}><Flex justify="space-between"><Text fontWeight="600">{source.title}</Text><HStack><Badge colorScheme={source.kind === '原始证据' ? 'green' : source.kind === '二次来源' ? 'orange' : 'gray'}>{source.kind}</Badge>{source.withdrawn && <Badge colorScheme="red">已撤下留档</Badge>}</HStack></Flex><Text fontSize="xs" color="gray.600" mt="2">{source.publisher} · {source.publishedAt} · V{source.version} · 入档 r{source.revision ?? 1}</Text><Text fontFamily="mono" fontSize="xs" mt="2">{source.contentHash}</Text><Divider my="2" /><Text fontSize="xs">{source.chainOfCustody}</Text><Text fontSize="xs" color="blue.600" mt="1" wordBreak="break-all">{source.url}</Text>{!source.withdrawn && <Button size="xs" variant="ghost" colorScheme="red" mt="2" onClick={() => { withdrawSource(claimId, factId, source.id, counter, '发布前另一窗口撤下（模拟）'); toast({ title: '证据已撤下但留档，相关批次将失效/标注复议', status: 'warning' }) }}>模拟另一窗口撤下此证据</Button>}</Box>)}</Box>
 }
 
 function AnnotationList({ fact, claimId }: { fact: ClaimFact; claimId: string }) {
   const addAnnotation = useClaimStore((state) => state.addAnnotation)
   const resolve = useClaimStore((state) => state.resolveAnnotation)
   const [text, setText] = useState('')
-  return <Box><Flex gap="2" mb="3"><Input placeholder="添加事实核查批注" value={text} onChange={(event) => setText(event.target.value)} /><Button onClick={() => { addAnnotation(claimId, fact.id, { author: '陆衡', role: '事实核查员', content: text }); setText('') }}>添加</Button></Flex>{fact.annotations.map((item) => <Box key={item.id} borderLeftWidth="3px" borderColor={item.resolved ? 'green.400' : 'orange.400'} bg={item.resolved ? 'green.50' : 'orange.50'} p="3" mb="2"><Flex justify="space-between"><Text fontWeight="600" fontSize="sm">{item.role} {item.author}</Text><Button size="xs" variant="ghost" isDisabled={item.resolved} onClick={() => resolve(claimId, fact.id, item.id)}>{item.resolved ? '已解决' : '标记解决'}</Button></Flex><Text fontSize="sm" mt="2">{item.content}</Text><Text fontSize="xs" color="gray.500" mt="1">{item.createdAt.replace('T', ' ').slice(0, 16)}</Text></Box>)}</Box>
+  return <Box><Flex gap="2" mb="3"><Input placeholder="添加事实核查批注（不推进修订号，不改变冻结依据）" value={text} onChange={(event) => setText(event.target.value)} /><Button onClick={() => { addAnnotation(claimId, fact.id, { author: '陆衡', role: '事实核查员', content: text }); setText('') }}>添加</Button></Flex>{fact.annotations.map((item) => <Box key={item.id} borderLeftWidth="3px" borderColor={item.resolved ? 'green.400' : 'orange.400'} bg={item.resolved ? 'green.50' : 'orange.50'} p="3" mb="2"><Flex justify="space-between"><Text fontWeight="600" fontSize="sm">{item.role} {item.author}</Text><Button size="xs" variant="ghost" isDisabled={item.resolved} onClick={() => resolve(claimId, fact.id, item.id)}>{item.resolved ? '已解决' : '标记解决'}</Button></Flex><Text fontSize="sm" mt="2">{item.content}</Text><Text fontSize="xs" color="gray.500" mt="1">{item.createdAt.replace('T', ' ').slice(0, 16)}</Text></Box>)}</Box>
 }
